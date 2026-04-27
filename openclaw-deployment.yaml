@@ -1,1 +1,992 @@
-# 读取文件内容
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'OpenClaw Deployment on AWS EC2 with ALB and HTTPS'
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: Domain name for OpenClaw (e.g., openclaw.example.com)
+  
+  AdminEmail:
+    Type: String
+    Description: Administrator email for Cognito user (required)
+    AllowedPattern: ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid email address
+  
+  AdminPassword:
+    Type: String
+    Description: Administrator password (min 8 chars, must include uppercase, lowercase, and number)
+    NoEcho: true
+    MinLength: 8
+    AllowedPattern: ^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$
+    ConstraintDescription: Must be at least 8 characters with uppercase, lowercase, and number
+  
+  UseRoute53AutoValidation:
+    Type: String
+    Description: "Use Route53 for automatic certificate validation? If 'false', you must provide ExistingCertificateArn"
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  
+  CreateNewHostedZone:
+    Type: String
+    Description: "Create new Route53 Hosted Zone? (Only applicable if UseRoute53AutoValidation is 'true')"
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  
+  Route53ZoneName:
+    Type: String
+    Description: "Route53 Hosted Zone domain name (e.g., example.com). Required ONLY if CreateNewHostedZone is 'true'. Leave empty otherwise."
+    Default: ""
+  
+  ExistingHostedZoneId:
+    Type: String
+    Description: "Existing Route53 Hosted Zone ID. Required ONLY if UseRoute53AutoValidation is 'true' AND CreateNewHostedZone is 'false'. Leave empty otherwise."
+    Default: ""
+  
+  ExistingCertificateArn:
+    Type: String
+    Description: "Existing ACM Certificate ARN. Required ONLY if UseRoute53AutoValidation is 'false'. Leave empty otherwise."
+    Default: ""
+  
+  CreateNewVPC:
+    Type: String
+    Description: "Create new VPC or use existing? If 'false', you must provide VPC and Subnet IDs"
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  
+  ExistingVPCId:
+    Type: String
+    Description: "Existing VPC ID. Required ONLY if CreateNewVPC is 'false'. Leave empty otherwise."
+    Default: ""
+  
+  ExistingSubnet1Id:
+    Type: String
+    Description: "Existing Subnet 1 ID in AZ1. Required ONLY if CreateNewVPC is 'false'. Leave empty otherwise."
+    Default: ""
+  
+  ExistingSubnet2Id:
+    Type: String
+    Description: "Existing Subnet 2 ID in AZ2. Required ONLY if CreateNewVPC is 'false'. Leave empty otherwise."
+    Default: ""
+  
+  EnableWAF:
+    Type: String
+    Description: Enable AWS WAF protection?
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  
+  BedrockModelId:
+    Type: String
+    Description: Bedrock model ID (optional)
+    Default: "bedrock/us.anthropic.claude-sonnet-4-6"
+  
+  BedrockRegion:
+    Type: String
+    Description: Bedrock region (should match the region where your model is available)
+    Default: "us-east-1"
+  
+  InstanceType:
+    Type: String
+    Description: EC2 instance type
+    Default: t4g.xlarge
+    AllowedValues:
+      - t4g.large
+      - t4g.xlarge
+      - t4g.2xlarge
+  
+  EnableCloudFront:
+    Type: String
+    Description: "Enable CloudFront in front of ALB? Restricts ALB to CloudFront-only access."
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  
+  CloudFrontCertificateArn:
+    Type: String
+    Description: "ACM Certificate ARN in us-east-1 for CloudFront. Required ONLY if EnableCloudFront is 'true'."
+    Default: ""
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Basic Configuration"
+        Parameters:
+          - DomainName
+          - AdminEmail
+          - AdminPassword
+      
+      - Label:
+          default: "Certificate Configuration"
+        Parameters:
+          - UseRoute53AutoValidation
+          - CreateNewHostedZone
+          - Route53ZoneName
+          - ExistingHostedZoneId
+          - ExistingCertificateArn
+      
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - CreateNewVPC
+          - ExistingVPCId
+          - ExistingSubnet1Id
+          - ExistingSubnet2Id
+      
+      - Label:
+          default: "Security & Performance"
+        Parameters:
+          - EnableWAF
+          - EnableCloudFront
+          - CloudFrontCertificateArn
+          - InstanceType
+      
+      - Label:
+          default: "Bedrock Configuration (Optional)"
+        Parameters:
+          - BedrockModelId
+          - BedrockRegion
+    
+    ParameterLabels:
+      DomainName:
+        default: "Domain Name *"
+      AdminEmail:
+        default: "Administrator Email *"
+      AdminPassword:
+        default: "Administrator Password *"
+      UseRoute53AutoValidation:
+        default: "Use Route53 for certificate validation?"
+      CreateNewHostedZone:
+        default: "Create new Hosted Zone? (if using Route53)"
+      Route53ZoneName:
+        default: "Hosted Zone domain (if creating new)"
+      ExistingHostedZoneId:
+        default: "Hosted Zone ID (if using existing)"
+      ExistingCertificateArn:
+        default: "Certificate ARN (if not using Route53)"
+      CreateNewVPC:
+        default: "Create new VPC?"
+      ExistingVPCId:
+        default: "VPC ID (if using existing)"
+      ExistingSubnet1Id:
+        default: "Subnet 1 ID (if using existing VPC)"
+      ExistingSubnet2Id:
+        default: "Subnet 2 ID (if using existing VPC)"
+      EnableWAF:
+        default: "Enable AWS WAF?"
+      EnableCloudFront:
+        default: "Enable CloudFront? (restricts ALB to CloudFront-only)"
+      CloudFrontCertificateArn:
+        default: "CloudFront Certificate ARN (us-east-1, if using CloudFront)"
+      InstanceType:
+        default: "EC2 Instance Type"
+      BedrockModelId:
+        default: "Bedrock Model ID"
+      BedrockRegion:
+        default: "Bedrock Region"
+
+Conditions:
+  UseRoute53: !Equals [!Ref UseRoute53AutoValidation, "true"]
+  CreateHostedZone: !And
+    - !Equals [!Ref UseRoute53AutoValidation, "true"]
+    - !Equals [!Ref CreateNewHostedZone, "true"]
+  CreateVPC: !Equals [!Ref CreateNewVPC, "true"]
+  CreateWAF: !Equals [!Ref EnableWAF, "true"]
+  CreateCloudFront: !Equals [!Ref EnableCloudFront, "true"]
+  NoCloudFront: !Equals [!Ref EnableCloudFront, "false"]
+  BedrockRegionSpecified: !Not [!Equals [!Ref BedrockRegion, ""]]
+
+Mappings:
+  CloudFrontPrefixList:
+    ap-southeast-1:
+      Id: pl-31a34658
+    ap-northeast-2:
+      Id: pl-22a6434b
+
+Resources:
+  # Route53 Hosted Zone (if creating new)
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Condition: CreateHostedZone
+    Properties:
+      Name: !Ref Route53ZoneName
+      HostedZoneConfig:
+        Comment: !Sub 'Hosted Zone for ${DomainName}'
+      HostedZoneTags:
+        - Key: Name
+          Value: !Sub '${Route53ZoneName}-zone'
+
+  # ACM Certificate (Route53 Auto Validation)
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: UseRoute53
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !If
+            - CreateHostedZone
+            - !Ref HostedZone
+            - !Ref ExistingHostedZoneId
+      Tags:
+        - Key: Name
+          Value: openclaw-certificate
+
+  # VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Condition: CreateVPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: openclaw-vpc
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: CreateVPC
+    Properties:
+      Tags:
+        - Key: Name
+          Value: openclaw-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateVPC
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVPC
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: openclaw-public-subnet-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVPC
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: openclaw-public-subnet-2
+
+  # Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateVPC
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: openclaw-public-rt
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateVPC
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVPC
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVPC
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Groups
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for OpenClaw ALB
+      VpcId: !If [CreateVPC, !Ref VPC, !Ref ExistingVPCId]
+      Tags:
+        - Key: Name
+          Value: openclaw-alb-sg
+
+  # When CloudFront enabled: only allow CloudFront IPs
+  ALBIngressCloudFront:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: CreateCloudFront
+    Properties:
+      GroupId: !Ref ALBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourcePrefixListId: !FindInMap [CloudFrontPrefixList, !Ref 'AWS::Region', Id]
+
+  # When CloudFront disabled: allow all
+  ALBIngressPublic:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: NoCloudFront
+    Properties:
+      GroupId: !Ref ALBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for OpenClaw EC2
+      VpcId: !If [CreateVPC, !Ref VPC, !Ref ExistingVPCId]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 18789
+          ToPort: 18789
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: openclaw-ec2-sg
+
+  # IAM Role
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: openclaw-ec2-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:ListFoundationModels
+                Resource: '*'
+        - PolicyName: SSMParameterAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: openclaw-ec2-profile
+      Roles:
+        - !Ref EC2Role
+
+  # EC2 Instance
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id}}'
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !If [CreateVPC, !Ref PublicSubnet1, !Ref ExistingSubnet1Id]
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          
+          # Install Node.js 22.x and dependencies
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+          apt-get install -y nodejs socat jq
+          
+          # Install OpenClaw
+          npm install -g openclaw
+          
+          # Create openclaw user
+          useradd -r -s /bin/bash -m -d /home/openclaw openclaw || true
+          mkdir -p /home/openclaw/.openclaw
+          chown -R openclaw:openclaw /home/openclaw
+          echo "openclaw ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/openclaw
+          chmod 440 /etc/sudoers.d/openclaw
+          
+          # Generate random token for Gateway API authentication
+          GATEWAY_TOKEN=$(openssl rand -hex 32)
+          
+          # Configure OpenClaw with proper settings
+          cat > /home/openclaw/.openclaw/openclaw.json << EOFCONFIG
+          {
+            "agents": {
+              "defaults": {
+                "model": "${BedrockModelId}"
+              }
+            },
+            "gateway": {
+              "mode": "local",
+              "bind": "loopback",
+              "trustedProxies": ["127.0.0.1", "::1"],
+              "auth": {
+                "token": "$GATEWAY_TOKEN"
+              },
+              "controlUi": {
+                "allowedOrigins": [
+                  "https://${DomainName}"
+                ]
+              }
+            }
+          }
+          EOFCONFIG
+          
+          chown openclaw:openclaw /home/openclaw/.openclaw/openclaw.json
+          
+          # Store Gateway Token in SSM Parameter Store for retrieval
+          aws ssm put-parameter \
+            --region ${AWS::Region} \
+            --name "/openclaw/${AWS::StackName}/gateway-token" \
+            --value "$GATEWAY_TOKEN" \
+            --type "SecureString" \
+            --overwrite || true
+          
+          # Determine Bedrock region (use stack region if not specified)
+          ACTUAL_BEDROCK_REGION="${BedrockRegion}"
+          if [ -z "$ACTUAL_BEDROCK_REGION" ]; then
+            ACTUAL_BEDROCK_REGION="${AWS::Region}"
+          fi
+          
+          # Create OpenClaw systemd service
+          cat > /etc/systemd/system/openclaw.service << EOF
+          [Unit]
+          Description=OpenClaw Gateway
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=openclaw
+          WorkingDirectory=/home/openclaw
+          Environment=NODE_OPTIONS=--max-old-space-size=8192
+          Environment=AWS_REGION=${!ACTUAL_BEDROCK_REGION}
+          Environment=AWS_DEFAULT_REGION=${!ACTUAL_BEDROCK_REGION}
+          Environment=AWS_PROFILE=default
+          Environment=OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN
+          ExecStart=/usr/bin/openclaw gateway --port 18790
+          Restart=always
+          RestartSec=10
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          # Create socat proxy service
+          cat > /etc/systemd/system/openclaw-proxy.service << 'EOF'
+          [Unit]
+          Description=OpenClaw Port Proxy
+          After=openclaw.service
+          Requires=openclaw.service
+          
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/socat TCP4-LISTEN:18789,bind=0.0.0.0,fork,reuseaddr TCP4:127.0.0.1:18790
+          Restart=always
+          RestartSec=5
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          # Start services
+          systemctl daemon-reload
+          systemctl enable openclaw openclaw-proxy
+          systemctl start openclaw
+          sleep 10
+          systemctl start openclaw-proxy
+          
+          echo "OpenClaw services started"
+          echo "Login at: https://${DomainName}"
+      Tags:
+        - Key: Name
+          Value: openclaw-instance
+
+  # Elastic IP
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: openclaw-eip
+
+  EIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref EC2Instance
+      EIP: !Ref ElasticIP
+
+  # Application Load Balancer
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: openclaw-alb
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !If
+        - CreateVPC
+        - - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+        - - !Ref ExistingSubnet1Id
+          - !Ref ExistingSubnet2Id
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: openclaw-alb
+
+  # Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: openclaw-tg
+      VpcId: !If [CreateVPC, !Ref VPC, !Ref ExistingVPCId]
+      Protocol: HTTP
+      Port: 18789
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      Targets:
+        - Id: !Ref EC2Instance
+          Port: 18789
+      Tags:
+        - Key: Name
+          Value: openclaw-tg
+
+  # WAF Web ACL
+  WAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Condition: CreateWAF
+    Properties:
+      Name: openclaw-waf
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      Rules:
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSetMetric
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesKnownBadInputsRuleSetMetric
+        - Name: RateLimitRule
+          Priority: 3
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitRuleMetric
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: OpenClawWAFMetric
+      Tags:
+        - Key: Name
+          Value: openclaw-waf
+
+  # WAF Association with ALB
+  WAFWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Condition: CreateWAF
+    Properties:
+      ResourceArn: !Ref ALB
+      WebACLArn: !GetAtt WAFWebACL.Arn
+
+  # Cognito User Pool
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: openclaw-users
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: false
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      UserPoolTags:
+        Name: openclaw-user-pool
+
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub 'openclaw-${AWS::AccountId}'
+      UserPoolId: !Ref CognitoUserPool
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: openclaw-alb-client
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      AllowedOAuthFlowsUserPoolClient: true
+      CallbackURLs:
+        - !Sub 'https://${DomainName}/oauth2/idpresponse'
+      SupportedIdentityProviders:
+        - COGNITO
+
+  CognitoAdminUser:
+    Type: AWS::Cognito::UserPoolUser
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      Username: !Ref AdminEmail
+      UserAttributes:
+        - Name: email
+          Value: !Ref AdminEmail
+        - Name: email_verified
+          Value: 'true'
+      MessageAction: SUPPRESS
+      ForceAliasCreation: false
+
+  CognitoPasswordLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CognitoPasswordPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminSetUserPassword
+                Resource: !GetAtt CognitoUserPool.Arn
+
+  CognitoPasswordLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-set-cognito-password'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt CognitoPasswordLambdaRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          cognito = boto3.client('cognito-idp')
+          def handler(event, context):
+              try:
+                  if event['RequestType'] in ['Create', 'Update']:
+                      cognito.admin_set_user_password(
+                          UserPoolId=event['ResourceProperties']['UserPoolId'],
+                          Username=event['ResourceProperties']['Username'],
+                          Password=event['ResourceProperties']['Password'],
+                          Permanent=True
+                      )
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  else:
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  SetCognitoPassword:
+    Type: Custom::SetCognitoPassword
+    DependsOn: CognitoAdminUser
+    Properties:
+      ServiceToken: !GetAtt CognitoPasswordLambda.Arn
+      UserPoolId: !Ref CognitoUserPool
+      Username: !Ref AdminEmail
+      Password: !Ref AdminPassword
+
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Protocol: HTTPS
+      Port: 443
+      Certificates:
+        - CertificateArn: !If
+            - UseRoute53
+            - !Ref Certificate
+            - !Ref ExistingCertificateArn
+      DefaultActions:
+        - Type: authenticate-cognito
+          Order: 1
+          AuthenticateCognitoConfig:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+            UserPoolClientId: !Ref CognitoUserPoolClient
+            UserPoolDomain: !Ref CognitoUserPoolDomain
+            OnUnauthenticatedRequest: authenticate
+        - Type: forward
+          Order: 2
+          TargetGroupArn: !Ref TargetGroup
+
+  HooksListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HTTPSListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          Values: [/hooks/*]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  ApiListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HTTPSListener
+      Priority: 2
+      Conditions:
+        - Field: path-pattern
+          Values: [/api/*]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  OpenAIApiListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HTTPSListener
+      Priority: 3
+      Conditions:
+        - Field: path-pattern
+          Values: [/v1/*]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  HealthCheckListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HTTPSListener
+      Priority: 4
+      Conditions:
+        - Field: path-pattern
+          Values: [/health]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # CloudFront Distribution (optional)
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: CreateCloudFront
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub 'OpenClaw CloudFront - ${DomainName}'
+        Aliases:
+          - !Ref DomainName
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CloudFrontCertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        Origins:
+          - Id: ALBOrigin
+            DomainName: !GetAtt ALB.DNSName
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+            OriginCustomHeaders:
+              - HeaderName: X-CloudFront-Secret
+                HeaderValue: !Sub '${AWS::StackName}-cf-origin-verify'
+        DefaultCacheBehavior:
+          TargetOriginId: ALBOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+        HttpVersion: http2and3
+        PriceClass: PriceClass_200
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-cloudfront'
+
+  # ============================================================
+  # AWS Backup - Daily EC2 Backup
+  # ============================================================
+  BackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties:
+      BackupVaultName: !Sub '${AWS::StackName}-vault'
+
+  BackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub '${AWS::StackName}-daily'
+        BackupPlanRule:
+          - RuleName: DailyBackup
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: 'cron(0 16 * * ? *)'
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 120
+            Lifecycle:
+              DeleteAfterDays: 30
+
+  BackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref BackupPlan
+      BackupSelection:
+        SelectionName: !Sub '${AWS::StackName}-ec2'
+        IamRoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/AWSBackupDefaultServiceRole'
+        Resources:
+          - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${EC2Instance}'
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !If [CreateVPC, !Ref VPC, !Ref ExistingVPCId]
+
+  ALBDNSName:
+    Description: ALB DNS Name
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-ALBDNSName'
+
+  OpenClawURL:
+    Description: OpenClaw HTTPS URL
+    Value: !Sub 'https://${DomainName}'
+
+  AdminEmail:
+    Description: Administrator email (login username)
+    Value: !Ref AdminEmail
+
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolId'
+
+  BedrockModel:
+    Description: Configured Bedrock model
+    Value: !Ref BedrockModelId
+
+  BedrockRegion:
+    Description: Configured Bedrock region
+    Value: !If [BedrockRegionSpecified, !Ref BedrockRegion, !Ref 'AWS::Region']
+
+  WAFWebACLArn:
+    Description: WAF Web ACL ARN (if enabled)
+    Condition: CreateWAF
+    Value: !GetAtt WAFWebACL.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-WAFWebACLArn'
+
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref EC2Instance
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceId'
+
+  ElasticIP:
+    Description: Elastic IP Address
+    Value: !Ref ElasticIP
+    Export:
+      Name: !Sub '${AWS::StackName}-ElasticIP'
+
+  GetTokenCommand:
+    Description: Command to retrieve OpenClaw Gateway Token
+    Value: !Sub 'aws ssm get-parameter --region ${AWS::Region} --name "/openclaw/${AWS::StackName}/gateway-token" --with-decryption --query "Parameter.Value" --output text'
+
+  CloudFrontDomainName:
+    Description: CloudFront Distribution Domain Name
+    Condition: CreateCloudFront
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID
+    Condition: CreateCloudFront
+    Value: !Ref CloudFrontDistribution
